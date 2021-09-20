@@ -1,110 +1,110 @@
 package delayqueue
 
 import (
-	"container/list"
-	"sync"
+	"github.com/golang-design/lockfree"
+	"log"
 	"time"
 )
 
-type wheelTask struct {
-	mu   *sync.Mutex
-	list *list.List
+type taskList struct {
+	stack *lockfree.Stack
 }
 
-type task struct {
-	//任务ID便于持久化
-	ID string
-	//任务类型
-	Type string
-	//任务在时间轮上的循环次数，等于0时，执行该任务
-	CycleCount int
-	//任务在时间轮上的位置
-	WheelPosition int
-	//任务具体执行
-	f func()
+type Task struct {
+	ID    string //任务ID便于持久化
+	Type  string //任务类型
+	Cycle int64  //任务在时间轮上的循环次数，等于0时，执行该任务
+	Pos   int64  //任务在时间轮上的位置
+	f     func() //任务具体执行
 }
 
-func (dq *DelayQueue) loadTasks() {
-	tasks := dq.GetList()
-	if tasks != nil && len(tasks) > 0 {
-		for _, t := range tasks {
-			delaySeconds := ((t.CycleCount + 1) * int(dq.wheelSize)) + t.WheelPosition
-			if delaySeconds > 0 {
-				dq.internalPush(time.Duration(delaySeconds)*time.Second, t.ID, t.Type,false)
-			}else{
-				dq.mu.RLock()
-				if f, ok := dq.fun[t.Type]; ok {
-					go f()
-				}
-				dq.mu.RUnlock()
-			}
+func (dq *DelayQueue) loadPersistentData() {
+	now := time.Now().Unix()
+
+	tm := dq.loadTime()
+	if tm == 0 {
+		tm = now
+	}
+	pos, cycle := dq.loadTick(now - tm)
+
+	tasks := dq.loadTasks()
+
+	for _, t := range tasks {
+		delaySeconds := (t.Cycle-cycle)*dq.wheelSize + t.Pos - pos
+		dq.push(delaySeconds, t.ID, t.Type, nil, false)
+	}
+}
+
+func (dq *DelayQueue) push(delaySeconds int64, taskID, taskType string, f func(), persistentData bool) {
+	if f == nil {
+		fun, ok := dq.fun.GetStringKey(taskType)
+		if !ok {
+			return
+		}
+		f, ok = fun.(func())
+		if !ok {
+			return
 		}
 	}
-}
 
-func (dq *DelayQueue) internalPush(delaySeconds time.Duration, taskID, taskType string, enableStore bool) {
-	dq.mu.RLock()
-	f := dq.fun[taskType]
-	dq.mu.RUnlock()
-	if f == nil {
+	if delaySeconds <= 0 {
+		go func() {
+			log.Println("run old task:", taskID)
+			f()
+			if persistentData {
+				dq.dropTask(taskID)
+			}
+		}()
 		return
 	}
 
-	if int(delaySeconds.Seconds()) <= 0 {
-		go f()
-		return
-	}
-	//从当前时间指针处开始计时
-	calculateValue := int(dq.currentIndex) + int(delaySeconds.Seconds())
+	calculateValue, cycle := dq.loadTick(0)
 
-	cycle := calculateValue / int(dq.wheelSize)
-	if cycle > 0 {
-		cycle--
-	}
-	index := calculateValue % int(dq.wheelSize)
+	calculateValue += delaySeconds
 
-	t := &task{
-		ID:            taskID,
-		Type:          taskType,
-		CycleCount:    cycle,
-		WheelPosition: index,
-		f: f,
-	}
+	cycle = (calculateValue / dq.wheelSize) - cycle
 
-	dq.wheels[index].mu.Lock()
-	defer dq.wheels[index].mu.Unlock()
-	dq.wheels[index].list.PushBack(t)
+	tick := calculateValue % dq.wheelSize
 
-	if enableStore {
+	t := &Task{ID: taskID, Type: taskType, Cycle: cycle, Pos: tick, f: f}
+
+	dq.wheels[tick].stack.Push(t)
+
+	log.Printf("store task: %s, type: %s, cycle: %d, pos: %d", taskID, taskType, cycle, tick)
+
+	if persistentData {
 		//持久化任务
-		dq.Save(t)
+		dq.saveTask(t)
 	}
 }
 
-func (dq *DelayQueue) scheduleTasks(wheel wheelTask) {
-	wheel.mu.Lock()
-	defer wheel.mu.Unlock()
-
+func (dq *DelayQueue) scheduleTasks(wheel taskList, cycle int64) {
+	var refillTasks []*Task
 	for {
-		element := wheel.list.Front()
+		element := wheel.stack.Pop()
 		if element == nil {
 			break
 		}
-
-		wheel.list.Remove(element)
-
-		t, ok := element.Value.(*task)
-
+		t, ok := element.(*Task)
 		if !ok {
 			continue
 		}
 
-		if t.CycleCount == 0 {
-			go t.f()
-			_ = dq.Delete(t.ID)
-		} else {
-			t.CycleCount--
+		t.Cycle -= cycle + 1
+
+		if t.Cycle <= 0 {
+			go func(f func(), ID string) {
+				f()
+				dq.dropTask(ID)
+			}(t.f, t.ID)
+			continue
 		}
 
+		dq.saveTask(t)
+		refillTasks = append(refillTasks, t)
+	}
+
+	for _, task := range refillTasks {
+		wheel.stack.Push(task)
 	}
 }
