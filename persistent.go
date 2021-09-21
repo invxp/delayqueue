@@ -23,7 +23,7 @@ func (dq *DelayQueue) loadTick(deltaTime int64) (pos int64, cycle int64) {
 }
 
 func (dq *DelayQueue) saveTask(task *Task) {
-	dq.saveTaskHandler(task.ID, task.Type, task.Cycle, task.Pos)
+	dq.saveTaskHandler(task.ID, task.Type, task.Timestamp, task.Cycle, task.Pos)
 }
 
 func (dq *DelayQueue) loadTasks() []Task {

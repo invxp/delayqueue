@@ -2,7 +2,7 @@
 
 ### 单层时间轮 基于Go实现, 主要能力:
 
-1. Push(delaySecond int64, taskType string) []values
+1. Push(delaySecond int64, taskType string) *Task
 2. AfterFunc(delaySecond int64, f func())
 
 ### 具体介绍:
@@ -25,23 +25,29 @@ go get github.com/invxp/delayqueue
 package main
 
 import (
-	"fmt"
 	"github.com/invxp/delayqueue"
+	"log"
 	"time"
 )
 
 func main() {
-    dq := delayqueue.New(10)
+	//新建一个DelayQueue
+	dq := delayqueue.New()
 
-    dq.AfterFunc(1, func() { fmt.Println("After 1 second function") })
+	delaySeconds := int64(5)
+	
+	//5秒后执行
+	dq.AfterFunc(delaySeconds, func() { log.Println("After 5 second function") })
 
-    go func() {
-        dq.Run()
-    }()
+	//开启任务(会阻塞, 创建一个协程)
+	go func() {
+		dq.Run()
+	}()
 
-    time.Sleep(time.Second * 5)
+	//等待10秒后退出
+	time.Sleep(time.Second * 10)
 
-    dq.Close()
+	log.Println("close delay queue error", dq.Close())
 }
 
 ```
@@ -59,5 +65,5 @@ $ go test -v -race
 ```
 
 ## TODO
-1. 优化过期的Task处理方式
-2. 支持分布式数据同步(Raft)
+1. 优化过期的Task处理方式(多层时间轮, 感觉没啥必要)
+2. 支持分布式数据同步(Raft, CP, 放弃性能保证一致性)

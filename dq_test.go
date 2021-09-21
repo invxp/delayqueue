@@ -11,7 +11,7 @@ import (
 )
 
 func TestRunDelayQueue(t *testing.T) {
-	dq := New(10)
+	dq := New()
 
 	dq.AfterFunc(1, func() { fmt.Println("After 1 second function") })
 
@@ -21,13 +21,14 @@ func TestRunDelayQueue(t *testing.T) {
 
 	time.Sleep(time.Second * 5)
 
-	dq.Close()
+	_ = dq.Close()
 }
 
 func TestRunDelayQueueWithFunction(t *testing.T) {
-	dq := New(10, WithFunctions(map[string]func(){"MU": func() {
-		fmt.Println("MU Function")
-	}}))
+	dq := New(
+		WithWheelSize(60*60*24),
+		WithFunctions(map[string]func(){"MU": func() { fmt.Println("MU Function") }}),
+	)
 
 	dq.Push(1, "MU")
 
@@ -37,11 +38,11 @@ func TestRunDelayQueueWithFunction(t *testing.T) {
 
 	time.Sleep(time.Second * 5)
 
-	dq.Close()
+	_ = dq.Close()
 }
 
 func TestRunDelayQueueWithBind(t *testing.T) {
-	dq := New(10)
+	dq := New()
 
 	dq.Bind("Bind", func() { fmt.Println("Bind Function") })
 
@@ -49,7 +50,7 @@ func TestRunDelayQueueWithBind(t *testing.T) {
 
 	go func() {
 		time.Sleep(time.Second * 35)
-		dq.Close()
+		_ = dq.Close()
 	}()
 
 	dq.Run()
@@ -61,10 +62,12 @@ func TestCustomPersistentInMemory(t *testing.T) {
 	ticker := rand.Int63n(wheelSize)
 	timeSecond := time.Now().Unix() - rand.Int63n(15)
 
-	hashMap.Set("test_5", Task{"test_5", "MU", 0, 5, nil})
-	hashMap.Set("test_15", Task{"test_15", "MU", 1, 5, nil})
+	hashMap.Set("test_5", Task{"test_5", "MU", 0, 5, time.Now().Unix(), true, nil})
+	hashMap.Set("test_15", Task{"test_15", "MU", 1, 5, time.Now().Unix(), true, nil})
 
-	queue := New(wheelSize, WithFunctions(map[string]func(){"MU": func() {}}),
+	queue := New(
+		WithWheelSize(wheelSize),
+		WithFunctions(map[string]func(){"MU": func() {}}),
 		WithDropTaskHandler(func(taskID string) {
 			lastLen := hashMap.Len()
 			hashMap.Del(taskID)
@@ -73,13 +76,13 @@ func TestCustomPersistentInMemory(t *testing.T) {
 		}), WithLoadTaskHandler(func() []Task {
 			var task []Task
 			for item := range hashMap.Iter() {
-				log.Printf("load task: %s, type: %s, cycle: %d, pos: %d", item.Value.(Task).ID, item.Value.(Task).Type, item.Value.(Task).Cycle, item.Value.(Task).Pos)
+				log.Printf("load task: %s, type: %s, pos: %d, time: %s", item.Value.(Task).ID, item.Value.(Task).Type, item.Value.(Task).Pos, time.Unix(item.Value.(Task).Timestamp, 0).Format("2006-01-02 15:04:05"))
 				task = append(task, item.Value.(Task))
 			}
 			return task
-		}), WithSaveTaskHandler(func(taskID, taskType string, cycle, pos int64) {
-			log.Printf("save task: %s, type: %s, cycle: %d, pos: %d", taskID, taskType, cycle, pos)
-			hashMap.Set(taskID, Task{taskID, taskType, cycle, pos, nil})
+		}), WithSaveTaskHandler(func(taskID, taskType string, timestamp, cycle, pos int64) {
+			log.Printf("save task: %s, type: %s, pos: %d, time: %s", taskID, taskType, pos, time.Unix(timestamp, 0).Format("2006-01-02 15:04:05"))
+			hashMap.Set(taskID, Task{taskID, taskType, cycle, pos, timestamp, true, nil})
 		}), WithLoadTickHandler(func() (tick int64) {
 			tick = atomic.LoadInt64(&ticker)
 			log.Printf("load tick: %d", tick)
@@ -96,7 +99,7 @@ func TestCustomPersistentInMemory(t *testing.T) {
 
 	go func() {
 		time.Sleep(time.Second * 30)
-		queue.Close()
+		_ = queue.Close()
 	}()
 
 	queue.Run()

@@ -11,11 +11,13 @@ type taskList struct {
 }
 
 type Task struct {
-	ID    string //任务ID便于持久化
-	Type  string //任务类型
-	Cycle int64  //任务在时间轮上的循环次数，等于0时，执行该任务
-	Pos   int64  //任务在时间轮上的位置
-	f     func() //任务具体执行
+	ID               string //任务ID便于持久化
+	Type             string //任务类型
+	Cycle            int64  //任务在时间轮上的循环次数，等于0时，执行该任务
+	Pos              int64  //任务在时间轮上的位置
+	Timestamp        int64  //任务首次加入时间
+	enablePersistent bool   //任务是否需要持久化
+	f                func() //任务具体执行
 }
 
 func (dq *DelayQueue) loadPersistentData() {
@@ -31,33 +33,34 @@ func (dq *DelayQueue) loadPersistentData() {
 
 	for _, t := range tasks {
 		delaySeconds := (t.Cycle-cycle)*dq.wheelSize + t.Pos - pos
-		dq.push(delaySeconds, t.ID, t.Type, nil, false)
+		f := dq.searchFunction(t.Type)
+		if dq.ensureValidTask(delaySeconds, t.Timestamp, t.ID, t.Type, f) {
+			dq.saveTask(dq.push(delaySeconds, t.Timestamp, t.ID, t.Type, f, true))
+		} else {
+			dq.dropTask(t.ID)
+		}
 	}
 }
 
-func (dq *DelayQueue) push(delaySeconds int64, taskID, taskType string, f func(), persistentData bool) {
-	if f == nil {
-		fun, ok := dq.fun.GetStringKey(taskType)
-		if !ok {
-			return
-		}
-		f, ok = fun.(func())
-		if !ok {
-			return
-		}
+func (dq *DelayQueue) searchFunction(taskType string) func() {
+	if fun, ok := dq.fun.GetStringKey(taskType); ok {
+		return fun.(func())
 	}
+	return func() {}
+}
 
-	if delaySeconds <= 0 {
+func (dq *DelayQueue) ensureValidTask(delaySeconds, timestamp int64, taskID, taskType string, f func()) (isValidTask bool) {
+	if delaySeconds <= 0 || (time.Now().Unix()-timestamp) > delaySeconds {
 		go func() {
-			log.Println("run old task:", taskID)
+			log.Printf("exec task: %s, type: %s, pos: %d, time: %s", taskID, taskType, delaySeconds, time.Unix(timestamp, 0).Format("2006-01-02 15:04:05"))
 			f()
-			if persistentData {
-				dq.dropTask(taskID)
-			}
 		}()
-		return
+		return false
 	}
+	return true
+}
 
+func (dq *DelayQueue) push(delaySeconds, timestamp int64, taskID, taskType string, f func(), enablePersistent bool) *Task {
 	calculateValue, cycle := dq.loadTick(0)
 
 	calculateValue += delaySeconds
@@ -66,20 +69,18 @@ func (dq *DelayQueue) push(delaySeconds int64, taskID, taskType string, f func()
 
 	tick := calculateValue % dq.wheelSize
 
-	t := &Task{ID: taskID, Type: taskType, Cycle: cycle, Pos: tick, f: f}
+	t := &Task{ID: taskID, Type: taskType, Cycle: cycle, Pos: tick, Timestamp: timestamp, f: f, enablePersistent: enablePersistent}
 
 	dq.wheels[tick].stack.Push(t)
 
-	log.Printf("store task: %s, type: %s, cycle: %d, pos: %d", taskID, taskType, cycle, tick)
+	log.Printf("push task: %s, type: %s, cycle: %d, pos: %d, time: %s", taskID, taskType, cycle, tick, time.Unix(timestamp, 0).Format("2006-01-02 15:04:05"))
 
-	if persistentData {
-		//持久化任务
-		dq.saveTask(t)
-	}
+	return t
 }
 
 func (dq *DelayQueue) scheduleTasks(wheel taskList, cycle int64) {
 	var refillTasks []*Task
+
 	for {
 		element := wheel.stack.Pop()
 		if element == nil {
@@ -94,16 +95,25 @@ func (dq *DelayQueue) scheduleTasks(wheel taskList, cycle int64) {
 
 		if t.Cycle <= 0 {
 			go func(f func(), ID string) {
+				log.Printf("exec task: %s, type: %s, pos: %d, time: %s", t.ID, t.Type, t.Pos, time.Unix(t.Timestamp, 0).Format("2006-01-02 15:04:05"))
 				f()
-				dq.dropTask(ID)
+				if t.enablePersistent {
+					dq.dropTask(ID)
+				}
 			}(t.f, t.ID)
 			continue
 		}
 
-		dq.saveTask(t)
 		refillTasks = append(refillTasks, t)
+
+		if t.enablePersistent {
+			dq.saveTask(t)
+		}
 	}
 
+	//TODO 方式不够优雅, 拿出来发现时间不够又重新放回去了
+	//TODO 目前没想到更好的解决方式
+	//TODO 用多级时间轮能减少IO, 但是是否真的有必要?
 	for _, task := range refillTasks {
 		wheel.stack.Push(task)
 	}
